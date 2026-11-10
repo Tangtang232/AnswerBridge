@@ -9,6 +9,8 @@ window.addEventListener('DOMContentLoaded', () => {
 contextBridge.exposeInMainWorld('desktop', {
   getInfo: () => ipcRenderer.invoke('desktop:info'),
   capture: kind => ipcRenderer.invoke('desktop:capture', kind),
+  openAnswerWindow: () => ipcRenderer.invoke('answer:open'),
+  publishAnswer: data => ipcRenderer.send('answer:publish',data),
   setShortcuts: value => ipcRenderer.invoke('desktop:shortcuts', value),
   openSettings: () => ipcRenderer.invoke('desktop:settings'),
   getSettings: () => ipcRenderer.invoke('settings:get'),

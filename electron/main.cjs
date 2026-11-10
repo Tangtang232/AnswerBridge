@@ -2,7 +2,8 @@ const { app, BrowserWindow, ipcMain, desktopCapturer, screen, globalShortcut, se
 const path = require('node:path');
 const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
-let window, service, overlay, selection, capturing = false, closing = false, editingInput = false;
+let window, service, overlay, selection, answerWindow, capturing = false, closing = false, editingInput = false;
+let latestAnswer = { status:'empty', answer:'', question:'', demo:false };
 let shortcuts = { full: 'Ctrl', region: 'Alt+D' };
 let shortcutStatus = {};
 let keyboardHook,ctrlTap,settingsTools,modelTest;
@@ -55,12 +56,32 @@ async function persistSettings(next){
   const {port,publicBase,modelTimeout,...saved}=next;
   const target=path.join(app.getPath('userData'),'settings.enc');
   await fs.promises.mkdir(path.dirname(target),{recursive:true});
-  await fs.promises.writeFile(target+'.tmp',safeStorage.encryptString(JSON.stringify(saved)));
-  await fs.promises.rename(target+'.tmp',target);Object.assign(service.config,next);
+  const oldProtection=service.config.screenProtection !== false;
+  const protectedWindows=[window,answerWindow].filter(w=>w && !w.isDestroyed());
+  try { for(const w of protectedWindows) w.setContentProtection(next.screenProtection !== false);
+    await fs.promises.writeFile(target+'.tmp',safeStorage.encryptString(JSON.stringify(saved)));
+    await fs.promises.rename(target+'.tmp',target);
+  } catch(error) { for(const w of protectedWindows) if(!w.isDestroyed()) w.setContentProtection(oldProtection); throw error; }
+  Object.assign(service.config,next);
+  sendAnswerUpdate();
   service.notifySettings();
   return settingsTools.viewSettings(service.config);
 }
 function reportError(error) { window?.webContents.send('app:error', error.message || '操作失败'); }
+function sendAnswerUpdate(){if(answerWindow && !answerWindow.isDestroyed())answerWindow.webContents.send('answer:update',{...latestAnswer,protection:service.config.screenProtection !== false});}
+async function openAnswerWindow() {
+  if(answerWindow && !answerWindow.isDestroyed()){answerWindow.show();answerWindow.focus();return;}
+  const display=screen.getDisplayNearestPoint(screen.getCursorScreenPoint());const area=display.workArea;
+  const child=new BrowserWindow({x:Math.max(area.x,area.x+area.width-470),y:area.y+32,width:430,height:340,minWidth:300,minHeight:180,show:false,alwaysOnTop:true,skipTaskbar:false,backgroundColor:'#ffffff',title:'答桥 · 答案小窗',webPreferences:{preload:path.join(__dirname,'answer-preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true}});
+  answerWindow=child;
+  child.setContentProtection(service.config.screenProtection !== false);
+  child.setMenuBarVisibility(false);
+  child.webContents.setWindowOpenHandler(()=>({action:'deny'}));
+  child.webContents.on('will-navigate',event=>event.preventDefault());
+  child.on('closed',()=>{if(answerWindow===child)answerWindow=null;});
+  try { await child.loadFile(path.join(__dirname,'answer.html'));if(!child.isDestroyed()){sendAnswerUpdate();child.show();} }
+  catch(error){if(!child.isDestroyed())child.destroy();throw error;}
+}
 function sendImage(image) {
   const size = image.getSize();
   const resized = size.width > 2560 ? image.resize({ width: 2560 }) : image;
@@ -68,9 +89,9 @@ function sendImage(image) {
 }
 async function capture(kind) {
   if (capturing) return; capturing = true;
-  const wasVisible = window?.isVisible(); const minimized = window?.isMinimized();
+  const wasVisible = window?.isVisible(); const minimized = window?.isMinimized(); const answerWasVisible=answerWindow?.isVisible();
   try {
-    window?.hide(); await pause(180);
+    window?.hide(); if(answerWasVisible)answerWindow?.hide(); await pause(180);
     const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
     const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: Math.round(display.size.width * display.scaleFactor), height: Math.round(display.size.height * display.scaleFactor) } });
     const source = sources.find(s => s.display_id === String(display.id)) || (sources.length === 1 ? sources[0] : null);
@@ -88,6 +109,7 @@ async function capture(kind) {
     }
   } finally {
     capturing = false;
+    if(answerWasVisible && answerWindow && !answerWindow.isDestroyed())answerWindow.showInactive();
     if (!window || window.isDestroyed()) return;
     // isVisible() reports false for a minimized window too, so decide on isMinimized() first.
     if (minimized) { window.showInactive(); window.minimize(); }
@@ -96,6 +118,9 @@ async function capture(kind) {
 }
 function setupIPC() {
   ipcMain.on('desktop:editing', (event, value) => { if (trusted(event.sender) && event.senderFrame === window.webContents.mainFrame) editingInput = value === true; });
+  ipcMain.on('answer:publish',(event,data)=>{if(!trusted(event.sender)||event.senderFrame!==window.webContents.mainFrame||!data||typeof data!=='object')return;latestAnswer={status:['empty','queued','generating','done','error'].includes(data.status)?data.status:'empty',answer:typeof data.answer==='string'?data.answer.slice(0,100000):'',question:typeof data.question==='string'?data.question.slice(0,10000):'',error:typeof data.error==='string'?data.error.slice(0,1000):'',demo:data.demo===true};sendAnswerUpdate();});
+  ipcMain.handle('answer:open',async event=>{verify(event);await openAnswerWindow();});
+  ipcMain.on('answer:opacity',(event,value)=>{if(event.sender!==answerWindow?.webContents||event.senderFrame!==answerWindow.webContents.mainFrame||typeof value!=='number'||!Number.isFinite(value))return;answerWindow.setOpacity(Math.max(0.6,Math.min(1,value)));});
   ipcMain.handle('desktop:info', event => { verify(event); return { serverUrl: service.baseUrl, desktopToken: service.desktopToken, platform: process.platform, ...registerInfo() }; });
   ipcMain.handle('desktop:capture', async (event, kind) => { verify(event); if (!['full','region'].includes(kind)) throw new Error('截图类型错误'); await capture(kind); return true; });
   ipcMain.handle('desktop:shortcuts', (event, next) => {
@@ -163,7 +188,9 @@ app.whenReady().then(async () => {
   for(let index=0;index<config.skills.length;index++){const old=config.skills[index];if(old.contentFormatVersion===2)continue;try{config.skills[index]={...await settingsTools.readSkill(old.path),id:old.id,enabled:old.enabled};migrated=true;}catch{config.skills[index]={...old,issues:['旧 Skill 无法刷新，请确认原文件仍存在后点击重新加载']};}}
   service = await createService({ config, webDir: path.join(root, 'dist') });
   if(migrated)await persistSettings(config);
-  window = new BrowserWindow({ width: 1260, height: 870, minWidth: 1020, minHeight: 720, backgroundColor: '#f4f6fb', title: '答桥 · AnswerBridge', webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
+  window = new BrowserWindow({ show: false, width: 1260, height: 870, minWidth: 1020, minHeight: 720, backgroundColor: '#f4f6fb', title: '答桥 · AnswerBridge', webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
+  window.setContentProtection(config.screenProtection !== false);
+  window.on('closed',()=>{answerWindow?.close();window=null;});
   window.setMenuBarVisibility(false);
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   const desktopUrl = process.env.ANSWERBRIDGE_DEV_URL || `${service.baseUrl}/desktop`;
@@ -181,6 +208,7 @@ app.whenReady().then(async () => {
   setupIPC();
   startCtrlHook();registerShortcuts();
   await window.loadURL(desktopUrl);
+  window.show();
 }).catch(error => { dialog.showErrorBox('答桥启动失败', error.message); app.quit(); });
 app.on('window-all-closed', () => app.quit());
 app.on('before-quit', event => {

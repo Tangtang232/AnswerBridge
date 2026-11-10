@@ -9,7 +9,7 @@ export function baseUrl(value) {
   return url.href.replace(/\/$/, '');
 }
 export function viewSettings(c) {
-  return { mode:c.mode, defaultProvider:c.defaultProvider, visionMode:c.visionMode || 'shared', visionProvider:c.visionProvider, visionModel:c.visionModel, contextTurns:c.contextTurns ?? 6,
+  return { mode:c.mode, defaultProvider:c.defaultProvider, screenProtection:c.screenProtection !== false, visionMode:c.visionMode || 'shared', visionProvider:c.visionProvider, visionModel:c.visionModel, contextTurns:c.contextTurns ?? 6,
     providers:Object.fromEntries(Object.entries(c.providers).map(([id,p])=>[id,{base:p.base,model:p.model,protocol:p.protocol||'chat',hasKey:!!p.key,modelsUrl:p.modelsUrl||''}])),
     skills:(c.skills||[]).map(({content,...s})=>({...s,characters:content.length,referenceCount:s.references?.length||0})),
     asr:{url:c.asr.url,resource:c.asr.resource,hasKey:!!c.asr.key,hasLegacyKey:!!(c.asr.appKey&&c.asr.accessKey)} };
@@ -18,6 +18,7 @@ export function mergeSettings(current, draft) {
   const c=structuredClone(current);
   if(!['demo','live'].includes(draft.mode)||!PROVIDERS[draft.defaultProvider]||!PROVIDERS[draft.visionProvider])throw Error('模式或服务商无效');
   c.mode=draft.mode;c.defaultProvider=draft.defaultProvider;c.visionMode=draft.visionMode === 'custom' ? 'custom' : 'shared';c.visionProvider=draft.visionProvider;c.visionModel=String(draft.visionModel||'').trim();
+  if(draft.screenProtection!==undefined){if(typeof draft.screenProtection!=='boolean')throw Error('共享屏幕保护设置无效');c.screenProtection=draft.screenProtection;}
   if(draft.contextTurns!==undefined){
     const turns=Number(draft.contextTurns);
     if(!Number.isInteger(turns)||turns<0||turns>20)throw Error('上下文轮数必须是 0 到 20 的整数');
