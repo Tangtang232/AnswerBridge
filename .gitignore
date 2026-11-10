@@ -1,0 +1,7 @@
+node_modules/
+dist/
+release/
+.env
+.env.local
+test-results/
+*.log

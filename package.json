@@ -1,0 +1,57 @@
+{
+  "name": "answerbridge",
+  "version": "0.2.3",
+  "private": true,
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "vite build --configLoader runner",
+    "start": "electron .",
+    "server": "node server/index.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "check": "node scripts/check.mjs",
+    "package:win": "npm run build && electron-builder --win --dir"
+  },
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "express": "^5.1.0",
+    "qrcode": "^1.5.4",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "uiohook-napi": "^1.5.5",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.7.0",
+    "electron": "45.0.0",
+    "electron-builder": "^26.0.12",
+    "vite": "^6.4.5"
+  },
+  "build": {
+    "appId": "local.answerbridge.desktop",
+    "productName": "AnswerBridge",
+    "directories": {
+      "output": "release/0.2.3"
+    },
+    "files": [
+      "electron/**",
+      "server/**",
+      "dist/**",
+      "package.json"
+    ],
+    "extraFiles": [
+      {
+        "from": ".env.example",
+        "to": ".env.example"
+      }
+    ],
+    "win": {
+      "target": "dir",
+      "signAndEditExecutable": false
+    },
+    "npmRebuild": false
+  },
+  "description": "Desktop audio and screenshot assistant with paired mobile answers",
+  "author": "AnswerBridge"
+}
