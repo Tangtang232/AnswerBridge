@@ -1,38 +1,249 @@
-import React,{useEffect,useRef,useState} from 'react';
-import{createRoot}from'react-dom/client';
-import{startAudio}from'./audio';
+import React, { useEffect, useRef, useState } from 'react';
+import { createRoot } from 'react-dom/client';
+import Settings, { providerNames } from './Settings.jsx';
+import MultiCapture from './MultiCapture.jsx';
 import './style.css';
-import Settings,{providerNames} from './Settings';
-const mobile=location.pathname==='/m';
-function App(){
- const[info,setInfo]=useState(null),[config,setConfig]=useState(null),[pair,setPair]=useState(null),[tasks,setTasks]=useState([]),[online,setOnline]=useState(false),[connected,setConnected]=useState(false),[error,setError]=useState(''),[question,setQuestion]=useState(''),[provider,setProvider]=useState('doubao'),[system,setSystem]=useState(true),[mic,setMic]=useState(true),[auto,setAuto]=useState(true),[recording,setRecording]=useState(false),[level,setLevel]=useState(0),[transcript,setTranscript]=useState(''),[asr,setAsr]=useState('stopped'),[base,setBase]=useState(''),[busy,setBusy]=useState(false);
- const[settingsOpen,setSettingsOpen]=useState(false),[notice,setNotice]=useState('');
- const providerRef=useRef(provider);providerRef.current=provider;
- const ws=useRef(),audio=useRef(),infoRef=useRef(),session=useRef(),reconnect=useRef(),alive=useRef(true);
- useEffect(()=>{if(!mobile)window.desktop?.publishAnswer(tasks.length?tasks[tasks.length-1]:{status:'empty'});},[tasks]);
- const request=async(route,body,owner=true)=>{const i=infoRef.current;const res=await fetch(`${i?.serverUrl||''}${route}`,{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json',...(owner?{Authorization:`Bearer ${i?.desktopToken}`}:{})},...(body===undefined?{}:{body:JSON.stringify(body)})});const data=await res.json();if(!res.ok)throw Error(data.error||'请求失败');return data;};
- const stop=()=>{audio.current?.();audio.current=null;setRecording(false);setLevel(0);if(ws.current?.readyState===1)ws.current.send(JSON.stringify({type:'audio_stop'}));};
- function connect(credentials){if(!alive.current)return;session.current=credentials;const socket=new WebSocket(`${infoRef.current?.serverUrl||location.origin}`.replace(/^http/,'ws')+'/ws');ws.current=socket;
- socket.onopen=()=>socket.send(JSON.stringify({type:'auth',role:mobile?'phone':'desktop',token:credentials.token,sessionId:credentials.sessionId}));
- socket.onmessage=({data})=>{const event=JSON.parse(data);if(event.type==='snapshot'){setConfig(c=>({...c,mode:event.mode}));setTasks(event.tasks);setOnline(event.phoneOnline);setConnected(true);setError('');}if(event.type==='config')setConfig(c=>({...c,mode:event.mode}));if(event.type==='presence')setOnline(event.phoneOnline);if(event.type==='task')setTasks(old=>[...old.filter(t=>t.id!==event.task.id),event.task].sort((a,b)=>a.createdAt-b.createdAt));if(event.type==='delta')setTasks(old=>old.map(t=>t.id===event.taskId?{...t,answer:t.answer+event.delta}:t));if(event.type==='error')setError(event.message);if(event.type==='transcript')setTranscript(event.text);if(event.type==='asr_state'){setAsr(event.state);if(event.message)setError(event.message);if(event.state==='error')stop();}};
- socket.onclose=event=>{setConnected(false);if(audio.current)stop();if([4001,4003].includes(event.code)){if(mobile)localStorage.removeItem('answerbridge');setError('连接已失效，请重新扫码配对');return;}if(alive.current)reconnect.current=setTimeout(()=>connect(credentials),2000);};socket.onerror=()=>setError('连接失败，请确认电脑服务和网络连接');
- }
- async function submit(text=question,image){if(!session.current)return;setError('');setBusy(true);try{await request(`/api/sessions/${session.current.sessionId}/tasks`,{question:text,image,provider:providerRef.current});if(!image)setQuestion('');}catch(e){setError(e.message);}finally{setBusy(false);}}
- async function retryScreenshot(task){if(!session.current||busy)return;setError('');setBusy(true);try{await request(`/api/sessions/${session.current.sessionId}/tasks/${task.id}/retry`,{provider:providerRef.current});}catch(e){setError(e.message);}finally{setBusy(false);}}
- useEffect(()=>{alive.current=true;let cleanCapture,cleanError;
- (async()=>{try{if(mobile){let credentials;const token=new URLSearchParams(location.hash.slice(1)).get('pair');if(token){const p=await request('/api/pair',{token},false);credentials={sessionId:p.sessionId,token:p.viewerToken};localStorage.setItem('answerbridge',JSON.stringify(credentials));history.replaceState(null,'','/m');setConfig({mode:p.mode});}else{credentials=JSON.parse(localStorage.getItem('answerbridge')||'null');}if(!credentials)throw Error('请先用微信扫描电脑端二维码');connect(credentials);}else{if(!window.desktop)throw Error('请使用答桥桌面程序启动控制台');const i=await window.desktop.getInfo();infoRef.current=i;setInfo(i);const c=await request('/api/config');setConfig(c);setProvider(c.defaultProvider);setBase(c.publicBase||c.networkUrls[0]?.url||i.serverUrl);const p=await request('/api/sessions',{});setPair(p);connect({sessionId:p.sessionId,token:i.desktopToken});cleanCapture=window.desktop.onCapture(({image})=>void submit('请识别并解答截图中的问题。',image));cleanError=window.desktop.onError(setError);}}catch(e){setError(e.message);}})();
- return()=>{alive.current=false;clearTimeout(reconnect.current);audio.current?.();ws.current?.close();cleanCapture?.();cleanError?.();};},[]);
- async function begin(){setError('');try{if(ws.current?.readyState!==1)throw Error('请等待会话连接');ws.current.send(JSON.stringify({type:'audio_start',autoAnswer:auto,provider}));audio.current=await startAudio({system,microphone:mic,onChunk:chunk=>{if(ws.current?.readyState===1&&ws.current.bufferedAmount<500000)ws.current.send(chunk);},onLevel:setLevel,onEnded:stop});setRecording(true);}catch(e){stop();setError(e.message);}}
- const label=t=>t.status==='done'?'已完成':t.status==='error'?'失败':t.status==='generating'?'正在回答':'等待中';
- const imageProvider=config?.visionMode==='custom'?config.visionProvider:provider;
- const imageModel=config?.visionMode==='custom'?config.visionModel:config?.providers?.[imageProvider]?.model;
- const cards=<div className="answers">{tasks.length===0?<div className="empty"><span className="empty-icon">✧</span><h3>答案会出现在这里</h3><p>{mobile?'保持页面打开，等待电脑发来问题。':'扫码连接手机，然后开始语音采集或截图提问。'}</p></div>:[...tasks].reverse().map(t=><article className="answer" key={t.id}><div className="meta"><span>{t.source==='screenshot'?'▧ 截图':t.source==='voice'?'◉ 语音':'⌨ 文字'} · {providerNames[t.provider]||t.provider}</span><span className={t.status==='generating'?'accent':''}>{label(t)}</span></div><h3>{t.question}</h3><div className="answer-text">{t.answer||(t.status==='error'?'':t.status==='queued'?'等待处理…':'正在准备答案…')}{t.status==='generating'&&<span className="cursor"/>}</div>{t.error&&<p className="error-inline">{t.error}</p>}{!mobile&&t.source==='screenshot'&&t.status==='error'&&<div><button className="secondary" disabled={busy||!connected} onClick={()=>retryScreenshot(t)}>重试截图回答</button><small> 截图仅在本机内存保留 2 分钟；重试将发给当前截图模型，可能产生费用。</small></div>}<footer>{new Date(t.createdAt).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})}{t.demo&&' · 演示内容'}</footer></article>)}</div>;
- return <div className={mobile?'app mobile':'app'}><header><div className="brand"><b className="logo">答</b><div><strong>答桥 <small>AnswerBridge</small></strong><p>{mobile?'答案，随手可见':'让问题留在电脑，让答案到达手机'}</p></div></div><span className="pill"><i className={connected?'dot':'dot gray'}/>{connected?(mobile?'已连接电脑':'会话已连接'):'连接中'}</span></header>
- {config?.mode==='demo'&&<div className="demo">演示模式 · 当前展示模拟回答。可在软件设置中填写密钥并选择真实模型。</div>}{error&&<div role="alert" className="error">{error}<button onClick={()=>setError('')}>×</button></div>}
- {notice&&<div role="status" className="saved-banner">{notice}<button onClick={()=>setNotice('')}>×</button></div>}{mobile?<><section className="mobile-heading"><div className="eyebrow">YOUR ANSWER FEED</div><h1>专注看答案。</h1><p>电脑采集，AI 思考，答案在此同步。</p></section>{cards}<div className="mobile-footer">答桥 · 当前会话最多保留 100 条记录</div></>:<main><aside><section className="panel pairing"><div className="section-title"><h2>连接手机</h2><span className={online?'online':'muted'}>{online?'● 手机在线':'等待扫码'}</span></div><p>微信扫一扫，与当前电脑配对</p>{pair?<img className="qr" alt="手机配对二维码" src={pair.qr}/>:<div className="qr skeleton"/>}<div className="qr-note">二维码有效期 2 分钟 · 使用后失效</div><select aria-label="配对网络" value={base} disabled={!pair} onChange={async e=>{const next=e.target.value;try{const refreshed=await request(`/api/sessions/${session.current.sessionId}/pair`,{base:next});setBase(next);setPair(refreshed);setError('');}catch(err){setError(err.message);}}}>{config?.publicBase&&<option>{config.publicBase}</option>}{config?.networkUrls.map(n=><option key={n.url} value={n.url}>{n.name} · {n.url}</option>)}{config?.networkUrls.length===0&&<option value={info?.serverUrl}>暂无局域网地址</option>}</select><button className="secondary full" disabled={!pair} onClick={async()=>{try{setPair(await request(`/api/sessions/${session.current.sessionId}/pair`,{base}));}catch(e){setError(e.message);}}}>刷新二维码</button><p className="hint">手机与电脑连接同一 Wi-Fi。连接失败时检查防火墙是否允许本程序。</p></section>
- <section className="panel"><h2>模型与连接</h2><div className="setting-row">共享屏幕保护<span>{config?.screenProtection===false?'已关闭':'已开启 · 请先验证'}</span></div><label>回答模型<select value={provider} disabled={recording} onChange={e=>setProvider(e.target.value)}>{Object.entries(providerNames).map(([id,name])=><option key={id} value={id}>{name}</option>)}</select></label><div className="active-model"><strong>{providerNames[provider]}</strong><span>{config?.providers?.[provider]?.model||'尚未选择模型'}</span><small>{config?.mode==='demo'?'演示模式 · 不调用真实模型':config?.providers?.[provider]?.ready?'配置完整 · 截图需要模型支持图片输入':'配置不完整 · 请填写密钥和模型'}</small></div><div className="setting-row">火山语音识别<span>{config?.asrReady?'已配置':'待配置'}</span></div><button className="text-button" onClick={()=>setSettingsOpen(true)}>软件设置 / 加载 Skill ↗</button><p className="hint">切换模型仅在本次使用中生效；默认模型可在设置中保存 · 已启用 {config?.skillCount||0} 个润色 Skill</p></section></aside>
- <div className="workspace"><div className="intro"><div className="eyebrow">DESKTOP WORKSPACE</div><h1>把问题交给 AI。</h1><p>语音、截图、文字，多种方式，答案直达手机。</p><button className="secondary" onClick={()=>window.desktop?.openAnswerWindow().catch(e=>setError(e.message))}>打开答案小窗</button><p className="hint">小窗保持置顶；共享屏幕前请先验证保护效果。</p></div><section className="panel capture"><div className="section-title"><h2>语音采集</h2><span className="muted">{recording?`采集中 · ASR ${asr}`:'准备就绪'}</span></div><div className="sources"><label><input type="checkbox" checked={system} disabled={recording} onChange={e=>setSystem(e.target.checked)}/> 系统声音<small>电脑播放的声音</small></label><label><input type="checkbox" checked={mic} disabled={recording} onChange={e=>setMic(e.target.checked)}/> 麦克风<small>你说话的声音</small></label></div><div className="audio-bar"><div className="meter"><div style={{width:`${Math.min(100,level*450)}%`}}/></div><button className={recording?'danger':'primary'} disabled={!connected||(!system&&!mic)} onClick={recording?stop:begin}>{recording?'■ 停止采集':'● 开始采集'}</button></div><label className="check"><input type="checkbox" disabled={recording} checked={auto} onChange={e=>setAuto(e.target.checked)}/> 识别到完整语句后自动回答</label>{transcript&&<div className="transcript"><span>最近转写</span><p>{transcript}</p><button className="text-button" onClick={()=>setQuestion(transcript)}>编辑后提问 ↗</button></div>}{config?.mode==='demo'&&<button className="text-button" disabled={!connected} onClick={()=>ws.current?.send(JSON.stringify({type:'demo_transcript'}))}>发送演示转写</button>}</section>
- <section className="panel"><div className="section-title"><h2>截图提问</h2><span className="muted">按 Home 可随时收起 / 显示窗口</span></div><p className="hint">当前截图模型：{providerNames[imageProvider]||'未选择'} / {imageModel||'未配置'} · 截图需要模型支持图片输入{config?.mode==='demo'?' · 当前为演示模式':''}</p><div className="screenshot-actions">{['full','region'].map((k,i)=><button key={k} className="capture-button" disabled={!connected} onClick={()=>window.desktop?.capture(k).catch(e=>setError(e.message))}><span>{i?'⌗ 框选截图':'▣ 全屏截图'}</span><kbd>{info?.shortcuts[k]?.replace('CommandOrControl','Ctrl')||'—'}</kbd>{info&&info.status[k]===false&&<small className="error-inline">快捷键注册失败，可点击截图</small>}</button>)}</div></section>
- <section className="panel composer"><textarea aria-label="输入问题" placeholder="也可以在这里输入问题…" value={question} onChange={e=>setQuestion(e.target.value)} maxLength={10000}/><div><span>答案将同步到已配对手机</span><button className="primary" disabled={!connected||busy||!question.trim()} onClick={()=>submit()}>发送问题 ↗</button></div></section><div className="section-title history-title"><h2>本次会话</h2><span className="muted">{tasks.length} 个问题</span></div>{cards}</div></main>}{settingsOpen&&<Settings onClose={()=>setSettingsOpen(false)} onSaved={async(saved)=>{const c=await request('/api/config');setConfig(c);setProvider(c.defaultProvider);setNotice(`设置已保存并生效：${providerNames[c.defaultProvider]} / ${c.providers[c.defaultProvider].model||'未选模型'}；${c.mode==='demo'?'当前为演示模式':'当前为真实模型模式'}；已启用 ${c.skillCount} 个 Skill。保存成功不代表接口已连通，可在设置中测试模型连接。`);}}/>}</div>;
+import './workspace.css';
+
+const mobile = location.pathname === '/m';
+const statusLabels = { queued: '等待中', generating: '正在回答', done: '已完成', error: '失败' };
+const sourceLabels = { screenshot: '▧ 截图', voice: '◉ 语音', text: '⌨ 文字' };
+
+function Answers({ tasks, busy, connected, retry }) {
+  return <div className="answers">
+    {tasks.length === 0 && <div className="empty">
+      <h3>答案会显示在这里</h3>
+      <p>{mobile ? '可以从手机发起截图。' : '截图或输入问题即可开始，手机连接可选。'}</p>
+    </div>}
+    {[...tasks].reverse().map(task => <article className="answer" key={task.id}>
+      <div className="meta">
+        <span>{sourceLabels[task.source]}{task.imageCount > 1 && ` · ${task.imageCount} 张`} · {providerNames[task.provider] || task.provider}</span>
+        <span className={task.status === 'generating' ? 'accent' : ''}>{statusLabels[task.status]}</span>
+      </div>
+      <h3>{task.question}</h3>
+      <div className="answer-text">
+        {task.answer || (task.status === 'error' ? '' : task.status === 'queued' ? '等待处理…' : '正在准备答案…')}
+        {task.status === 'generating' && <span className="cursor" />}
+      </div>
+      {task.error && <p className="error-inline">{task.error}</p>}
+      {!mobile && task.source === 'screenshot' && task.status === 'error' && <div>
+        <button className="secondary" disabled={busy || !connected} onClick={() => retry(task)}>重试截图回答</button>
+        <small> 截图在本机内存保留 2 分钟。重试可能产生费用。</small>
+      </div>}
+      <footer>{new Date(task.createdAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</footer>
+    </article>)}
+  </div>;
 }
-createRoot(document.getElementById('root')).render(<App/>);
+
+function Pairing({ connected, online, config, base, refresh, pair, busy, clear }) {
+  const [open, setOpen] = useState(false);
+  const networks = config?.networkUrls ?? [];
+  function requestPair(value) {
+    clear();
+    void refresh(value);
+  }
+  return <section className="panel pairing">
+    <div className="section-title"><h2>手机同步</h2>{online && <span className="online">已连接</span>}</div>
+    <button className="secondary full" aria-expanded={open} disabled={!connected || busy} onClick={() => {
+      setOpen(!open);
+      if (!open) requestPair(base);
+    }}>{open ? '收起配对' : '连接手机'}</button>
+    {open && <div className="pairing-options">
+      <p className="hint">手机与电脑连同一 Wi-Fi，用微信扫一扫。</p>
+      {pair ? <img className="qr" src={pair.qr} alt="手机配对二维码" /> :
+        <p role="status">{busy ? '正在生成二维码…' : '二维码未生成'}</p>}
+      {(networks.length > 1 || (config?.publicBase && networks.length > 0)) && <details>
+        <summary>切换配对网络</summary>
+        <select aria-label="配对网络" value={base} disabled={busy} onChange={event => requestPair(event.target.value)}>
+          {config.publicBase && <option value={config.publicBase}>{config.publicBase}</option>}
+          {networks.map(network => <option key={network.url} value={network.url}>{network.name} · {network.url}</option>)}
+        </select>
+      </details>}
+      <button className="text-button" disabled={busy} onClick={() => requestPair(base)}>刷新二维码</button>
+    </div>}
+  </section>;
+}
+
+function App() {
+  const [info, setInfo] = useState(null);
+  const [config, setConfig] = useState(null);
+  const [tasks, setTasks] = useState([]);
+  const [online, setOnline] = useState(false);
+  const [connected, setConnected] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [question, setQuestion] = useState('');
+  const [base, setBase] = useState('');
+  const [pair, setPair] = useState(null);
+  const [pairBusy, setPairBusy] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [settings, setSettings] = useState(null);
+  const [batch, setBatch] = useState(false);
+  const session = useRef();
+  const desktop = useRef();
+  const previousTasks = useRef(new Map());
+
+  async function request(route, body, token = desktop.current?.desktopToken) {
+    const result = await fetch((desktop.current?.serverUrl ?? '') + route, {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) })
+    });
+    const data = await result.json();
+    if (!result.ok) throw Error(data.error || '请求失败');
+    return data;
+  }
+
+  useEffect(() => {
+    let active = true, socket, reconnect, offCapture, offError, offSettings;
+    function connect(credentials) {
+      if (!active) return;
+      session.current = credentials;
+      socket = new WebSocket((desktop.current?.serverUrl ?? location.origin).replace(/^http/, 'ws') + '/ws');
+      socket.onopen = () => socket.send(JSON.stringify({ type: 'auth', role: mobile ? 'phone' : 'desktop', ...credentials }));
+      socket.onmessage = ({ data }) => {
+        const event = JSON.parse(data);
+        if (event.type === 'snapshot') {
+          setTasks(event.tasks); setOnline(event.phoneOnline); setConnected(true); setError('');
+        }
+        if (event.type === 'config' || event.type === 'snapshot') {
+          setConfig(current => ({ ...current, visionReady: event.visionReady }));
+        }
+        if (event.type === 'presence') setOnline(event.phoneOnline);
+        if (event.type === 'task') setTasks(current => [...current.filter(t => t.id !== event.task.id), event.task].sort((a, b) => a.createdAt - b.createdAt));
+        if (event.type === 'delta') setTasks(current => current.map(t => t.id === event.taskId ? { ...t, answer: t.answer + event.delta } : t));
+        if (event.type === 'error') setError(event.message);
+      };
+      socket.onclose = event => {
+        setConnected(false);
+        if ([4001, 4003].includes(event.code)) {
+          if (mobile) { localStorage.removeItem('answerbridge'); setBatch(false); }
+          setError('连接已失效，请重新扫码配对。');
+        } else if (active) reconnect = setTimeout(() => connect(credentials), 2000);
+      };
+      socket.onerror = () => setError('连接失败，请检查电脑服务和网络。');
+    }
+    async function init() {
+      if (mobile) {
+        const token = new URLSearchParams(location.hash.slice(1)).get('pair');
+        let credentials;
+        if (token) {
+          const data = await request('/api/pair', { token }, null);
+          credentials = { sessionId: data.sessionId, token: data.viewerToken };
+          localStorage.setItem('answerbridge', JSON.stringify(credentials));
+          history.replaceState(null, '', '/m');
+        } else credentials = JSON.parse(localStorage.getItem('answerbridge') || 'null');
+        if (!credentials) throw Error('请先扫描电脑端二维码。');
+        connect(credentials);
+      } else {
+        if (!window.desktop) throw Error('请使用答桥桌面程序。');
+        const info = await window.desktop.getInfo();
+        desktop.current = info; setInfo(info);
+        const config = await request('/api/config');
+        setConfig(config); setBase(config.publicBase || config.networkUrls[0]?.url || info.serverUrl);
+        const { sessionId } = await request('/api/sessions', {});
+        connect({ sessionId, token: info.desktopToken });
+        offCapture = window.desktop.onCapture(({ image }) => void runTask('tasks', { image, question: '请识别并解答截图中的问题。' }));
+        offError = window.desktop.onError(setError);
+        offSettings = window.desktop.onRealtimeSettings(() => setSettings('voice'));
+      }
+    }
+    void init().catch(e => setError(e.message));
+    return () => { active = false; clearTimeout(reconnect); socket?.close(); offCapture?.(); offError?.(); offSettings?.(); };
+  }, []);
+
+  useEffect(() => {
+    if (mobile || !window.desktop) return;
+    const current = new Map();
+    for (const task of tasks) {
+      current.set(task.id, task);
+      if (previousTasks.current.get(task.id) !== task) window.desktop.publishAnswer(task);
+    }
+    previousTasks.current = current;
+  }, [tasks]);
+
+  async function runTask(action, body) {
+    const current = session.current;
+    if (!current) return;
+    setBusy(true); setError('');
+    try {
+      await request(`/api/sessions/${current.sessionId}/${action}`, body, current.token);
+      if (action === 'tasks' && !body.image) setQuestion('');
+      if (action === 'capture') setNotice('电脑截图已提交。');
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  }
+
+  async function refreshPair(address) {
+    if (!session.current || pairBusy) return;
+    setPairBusy(true); setError('');
+    try {
+      setPair(await request(`/api/sessions/${session.current.sessionId}/pair`, { base: address }));
+      setBase(address);
+    } catch (e) { setError(e.message); }
+    finally { setPairBusy(false); }
+  }
+
+  const currentModel = config?.providers?.[config.defaultProvider];
+  const visionReady = Boolean(config?.visionReady);
+  const answers = <Answers tasks={tasks} busy={busy} connected={connected} retry={task => runTask(`tasks/${task.id}/retry`, {})} />;
+  return <div className={mobile ? 'app mobile' : 'app'}>
+    <header>
+      <div className="brand"><b className="logo">答</b><div><strong>答桥 <small>AnswerBridge</small></strong><p>{mobile ? '同步答案' : '桌面工作台'}</p></div></div>
+      <span className="pill"><i className={connected ? 'dot' : 'dot gray'} />{connected ? (mobile ? '已连接电脑' : '会话已连接') : '连接中'}</span>
+    </header>
+    {error && <div role="alert" className="error">{error}<button aria-label="关闭错误提示" onClick={() => setError('')}>×</button></div>}
+    {notice && <div role="status" className="saved-banner">{notice}<button aria-label="关闭提示" onClick={() => setNotice('')}>×</button></div>}
+    {mobile ? <>
+      <section className="mobile-heading">
+        <h1>查看答案</h1>
+        <button className="primary full remote-capture" disabled={!connected || !visionReady || busy || batch} onClick={() => runTask('capture', {})}>{busy ? '正在截取电脑屏幕…' : '截取电脑全屏并回答'}</button>
+        <button className="secondary full multi-trigger" disabled={!connected || !visionReady || busy || batch} onClick={() => setBatch(true)}>多图提问</button>
+        <p className="hint">{connected && !visionReady ? '请先在电脑端配置支持图片的回答模型。' : '截取电脑鼠标所在的屏幕。'}</p>
+      </section>
+      {batch && <MultiCapture credentials={session.current} connected={connected} onClose={() => setBatch(false)} onSubmitted={count => {
+        setBatch(false); setNotice(`已提交 ${count} 张截图。`);
+      }} />}
+      {answers}<div className="mobile-footer">本次会话最多保留 100 条记录</div>
+    </> : <main>
+      <aside><Pairing connected={connected} online={online} config={config} base={base} refresh={refreshPair} pair={pair} busy={pairBusy} clear={() => setPair(null)} /></aside>
+      <div className="workspace">
+        <div className="panel workspace-toolbar">
+          <div><h1>提问工作台</h1><p className={`model-indicator ${currentModel?.ready ? 'ready' : ''}`}>{currentModel?.ready ? `${providerNames[config.defaultProvider]} · ${currentModel.model}` : '回答模型待配置'}</p></div>
+          <div className="workspace-actions">
+            <button className="primary" onClick={() => window.desktop.openAnswerWindow().catch(e => setError(e.message))}>打开答案小窗</button>
+            <button className="secondary" onClick={() => setSettings('voice')}>软件设置</button>
+          </div>
+        </div>
+        <div className="input-grid">
+          <section className="panel screenshot-panel">
+            <div className="section-title"><h2>截图提问</h2><span className="muted">Home 收起主窗</span></div>
+            <div className="screenshot-actions">{['full', 'region'].map(kind => <button key={kind} className="capture-button" disabled={!connected} onClick={() => {
+              if (!visionReady) setSettings('model');
+              else void window.desktop.capture(kind).catch(e => setError(e.message));
+            }}><span>{kind === 'full' ? '▣ 全屏截图' : '⌗ 框选截图'}</span><kbd>{info?.shortcuts[kind]?.replace('CommandOrControl', 'Ctrl') || '—'}</kbd>
+              {info?.status[kind] === false && <small className="error-inline">快捷键未注册，可点击截图</small>}
+            </button>)}</div>
+            {!visionReady && connected && <p className="hint setup-tip">首次截图前，请配置支持图片的模型。</p>}
+          </section>
+          <section className="panel composer">
+            <h2>文字提问</h2>
+            <textarea aria-label="输入问题" placeholder="输入你想问的问题…" value={question} onChange={event => setQuestion(event.target.value)} maxLength={10000} />
+            <div><span>{online && '答案将同步到手机'}</span><button className="primary"
+              disabled={!connected || busy || (currentModel?.ready && !question.trim())}
+              onClick={() => currentModel?.ready ? runTask('tasks', { question }) : setSettings('model')}>
+              {currentModel?.ready ? '发送问题 ↗' : '配置回答模型'}
+            </button></div>
+          </section>
+        </div>
+        <div className="section-title history-title"><h2>本次会话</h2><span className="muted">{tasks.length} 个问题</span></div>
+        {answers}
+      </div>
+    </main>}
+    {settings && <Settings initialSection={settings} onClose={() => setSettings(null)} onSaved={async () => {
+      setConfig(await request('/api/config')); setNotice('设置已保存');
+    }} />}
+  </div>;
+}
+
+createRoot(document.getElementById('root')).render(<App />);

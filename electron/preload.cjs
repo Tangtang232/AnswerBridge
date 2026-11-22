@@ -15,11 +15,13 @@ contextBridge.exposeInMainWorld('desktop', {
   openSettings: () => ipcRenderer.invoke('desktop:settings'),
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: draft => ipcRenderer.invoke('settings:save',draft),
+  setupRealtime: draft => ipcRenderer.invoke('settings:realtime-setup',draft),
   fetchModels: (id,draft) => ipcRenderer.invoke('settings:models',id,draft),
   testModel: (id,draft) => ipcRenderer.invoke('settings:test',id,draft),
   testVision: (id,draft,model) => ipcRenderer.invoke('settings:test-vision',id,draft,model),
   refreshSkill: id => ipcRenderer.invoke('settings:refresh-skill',id),
-  importSkills: kind => ipcRenderer.invoke('settings:skills',kind),
+  importSkills: (kind, scope) => ipcRenderer.invoke('settings:skills',kind,scope),
   onCapture: fn => listen('capture:ready', fn),
-  onError: fn => listen('app:error', fn)
+  onError: fn => listen('app:error', fn),
+  onRealtimeSettings: fn => listen('settings:open-realtime', fn)
 });

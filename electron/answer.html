@@ -1,3 +1,41 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'"><meta name="viewport" content="width=device-width,initial-scale=1"><title>答桥 · 答案小窗</title><link rel="stylesheet" href="answer.css"></head>
-<body><header><div><strong>答桥 · 答案小窗</strong><small id="status">等待问题</small></div><label>透明度 <input id="opacity" type="range" min="60" max="100" value="100" aria-label="小窗透明度"></label></header><main><div id="demo" hidden>演示答案</div><div id="question"></div><div id="answer" aria-live="polite">提交问题后，答案会显示在这里。</div><div id="error" hidden></div></main><footer id="protection">置顶显示 · 共享保护请先验证</footer><script src="answer.js"></script></body></html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>答桥 · 答案小窗</title>
+  <link rel="stylesheet" href="answer.css">
+</head>
+<body>
+  <header>
+    <strong>答桥 · 答案小窗</strong>
+    <div class="appearance">
+      <div class="font-controls" role="group" aria-label="调整文字大小">
+        <button id="font-smaller" type="button" aria-label="缩小文字">A−</button>
+        <output id="font-size" aria-label="当前字号">16</output>
+        <button id="font-larger" type="button" aria-label="放大文字">A+</button>
+      </div>
+      <label>透明度 <input id="opacity" type="range" min="60" max="100" value="100" aria-label="小窗透明度"></label>
+    </div>
+  </header>
+  <section class="voice-bar" aria-label="实时语音">
+    <div class="realtime-controls">
+      <button id="realtime-toggle" type="button">开始实时语音</button>
+      <button id="realtime-commit" type="button" hidden disabled>立即发送</button>
+      <button id="realtime-settings" type="button" hidden>配置实时语音</button>
+    </div>
+    <div id="realtime-status" role="status">准备就绪</div>
+  </section>
+  <main id="history-scroll" aria-label="本次会话" tabindex="0">
+    <p id="empty">提交问题后，答案会显示在这里。</p>
+    <div id="history"></div>
+  </main>
+  <footer>
+    <span id="protection">置顶显示 · 共享保护请先验证</span>
+    <button id="jump-latest" type="button" hidden>查看最新 ↓</button>
+  </footer>
+  <script src="answer.js"></script>
+  <script src="realtime-ui.js"></script>
+</body>
+</html>

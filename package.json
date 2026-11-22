@@ -1,6 +1,6 @@
 {
   "name": "answerbridge",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "main": "electron/main.cjs",
@@ -32,7 +32,7 @@
     "appId": "local.answerbridge.desktop",
     "productName": "AnswerBridge",
     "directories": {
-      "output": "release/0.2.3"
+      "output": "release/0.3.0"
     },
     "files": [
       "electron/**",

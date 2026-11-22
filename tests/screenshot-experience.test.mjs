@@ -13,7 +13,7 @@ test('图片能力测试发送内置图片，不携带个人 Skill', async()=>{
 });
 
 test('失败截图只允许桌面在会话内重试，重试后不能重复提交',async()=>{
- const c=loadConfig({PORT:'0'});let attempts=0;
+ const c=loadConfig({PORT:'0',DOUBAO_API_KEY:'test-key',DOUBAO_MODEL:'fixture-model'});let attempts=0;
  async function* fake(_c,task){attempts++;if(attempts===1)throw Error('fake failure');assert.ok(task.image);yield '成功';}
  const service=await createService({config:c,host:'127.0.0.1',modelAnswer:fake});
  const req=(path,body,token=service.desktopToken)=>fetch(service.baseUrl+path,{method:'POST',headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},body:JSON.stringify(body)});

@@ -5,15 +5,14 @@ import fs from 'node:fs';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import QRCode from 'qrcode';
-import { loadConfig, networkUrls, publicConfig } from './config.mjs';
+import { loadConfig, networkUrls, publicConfig, resolveModel } from './config.mjs';
 import { answer } from './models.mjs';
-import { VolcASR } from './volc-asr.mjs';
 
 const secret = () => randomBytes(24).toString('base64url');
 const equal = (a, b) => typeof a === 'string' && typeof b === 'string' && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 const failure = (message, status = 400) => Object.assign(new Error(message), { status });
 const send = (ws, event) => { if (ws.readyState === WebSocket.OPEN) { if (ws.bufferedAmount > 2_000_000) ws.close(1013, 'reconnect'); else ws.send(JSON.stringify(event)); } };
-const publicTask = ({ image, controller, ...rest }) => rest;
+const publicTask = ({ image, images, controller, ...rest }) => rest;
 const CONTEXT_CHARS = 12_000;
 // Earlier turns give the model continuity. Screenshots are kept as text only: the image itself
 // is dropped once answered, and re-sending old images would multiply cost per new question.
@@ -30,23 +29,30 @@ function contextHistory(session, current, turns) {
   return picked;
 }
 
-export async function createService({ config = loadConfig(), webDir = path.resolve('dist'), host = '0.0.0.0', modelAnswer = answer, asrFactory = (...args) => new VolcASR(...args) } = {}) {
+export async function createService({ config = loadConfig(), webDir = path.resolve('dist'), host = '0.0.0.0', modelAnswer = answer, captureScreen } = {}) {
   const app = express(), server = http.createServer(app);
   const sockets = new WebSocketServer({ noServer: true, maxPayload: 1_000_000 });
-  const desktopToken = secret(), sessions = new Map(), retryImages = new Map(); let port;
+  const desktopToken = secret(), sessions = new Map(), retryImages = new Map(); let port, remoteCapturePending = false;
   function forgetRetry(id) { const entry=retryImages.get(id); if(entry){clearTimeout(entry.timer);retryImages.delete(id);} }
   function rememberRetry(task, sessionId) {
     while(retryImages.size>=5) forgetRetry(retryImages.keys().next().value);
-    const entry={image:task.image, sessionId, timer:null};
+    const entry={image:task.image, images:task.images, sessionId, timer:null};
     entry.timer=setTimeout(()=>forgetRetry(task.id),120000); entry.timer.unref(); retryImages.set(task.id,entry);
   }
   app.disable('x-powered-by');
   app.use((_req, res, next) => { res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Cache-Control': 'no-store' }); next(); });
+  app.use('/api/sessions/:id/image-batch', (req, _res, next) => {
+    const s = sessions.get(req.params.id);
+    const token = req.headers.authorization?.replace(/^Bearer /, '');
+    if (!s?.viewerToken || !equal(token, s.viewerToken)) return next(failure('配对已失效，请重新扫码', 401));
+    next();
+  }, express.json({ limit: '25mb' }));
   app.use(express.json({ limit: '9mb' }));
   const owner = (req, _res, next) => equal(req.headers.authorization?.replace(/^Bearer /, ''), desktopToken) ? next() : next(failure('未授权', 401));
   const getSession = id => { const session = sessions.get(id); if (!session) throw failure('会话不存在，请重新扫码', 404); return session; };
   const announce = (s, event) => { for (const ws of s.clients) send(ws, event); };
-  const snapshot = s => ({ type: 'snapshot', sessionId: s.id, mode: config.mode, paired: !!s.viewerToken, phoneOnline: [...s.clients].some(w => w.role === 'phone' && w.readyState === WebSocket.OPEN), tasks: s.tasks.map(publicTask) });
+  const visionReady = () => resolveModel(config, config.defaultProvider, true).ready;
+  const snapshot = s => ({ type: 'snapshot', sessionId: s.id, visionReady: visionReady(), paired: !!s.viewerToken, phoneOnline: [...s.clients].some(w => w.role === 'phone' && w.readyState === WebSocket.OPEN), tasks: s.tasks.map(publicTask) });
   const allowedBases = () => [ `http://127.0.0.1:${port}`, `http://localhost:${port}`, ...networkUrls(port).map(x => x.url), ...(config.publicBase ? [config.publicBase] : []) ];
   async function pairing(s, selectedBase) {
     const base = selectedBase || config.publicBase || networkUrls(port)[0]?.url || `http://127.0.0.1:${port}`;
@@ -57,12 +63,16 @@ export async function createService({ config = loadConfig(), webDir = path.resol
   }
   function enqueue(s, body) {
     const question = typeof body.question === 'string' ? body.question.trim() : '';
-    if (question.length > 10000 || (!question && !body.image)) throw failure('请输入问题');
+    const images = body.images === undefined ? (body.image ? [body.image] : []) : body.images;
+    if (!Array.isArray(images) || images.length > 6 || images.some(image => typeof image !== 'string' || image.length > 8_000_000 || !/^data:image\/(png|jpeg);base64,[A-Za-z0-9+/]+=*$/.test(image)) || images.reduce((total, image) => total + image.length, 0) > 24_000_000) throw failure('最多提交 6 张截图，单张不超过 6 MB，总大小不超过 18 MB');
+    if (question.length > 10000 || (!question && !images.length)) throw failure('请输入问题');
     if (body.image && (typeof body.image !== 'string' || body.image.length > 8_000_000 || !/^data:image\/(png|jpeg);base64,[A-Za-z0-9+/]+=*$/.test(body.image))) throw failure('截图格式无效或超过 6 MB');
     if (s.tasks.filter(t => ['queued', 'generating'].includes(t.status)).length >= 5) throw failure('待处理问题已达 5 个，请等待答案后重试', 429);
-    const task = { id: randomUUID(), question: question || '请解答截图中的问题', image: body.image || null, hasImage: !!body.image, provider: Object.hasOwn(config.providers,body.provider) ? body.provider : config.defaultProvider, source: body.image ? 'screenshot' : body.source === 'voice' ? 'voice' : 'text', status: 'queued', answer: '', error: '', createdAt: Date.now(), demo: config.mode === 'demo' };
-    if (task.hasImage && config.visionMode === 'custom') task.provider = config.visionProvider;
-    if (task.hasImage) task.model = config.visionMode === 'custom' ? config.visionModel : config.providers[task.provider]?.model;
+    const hasImage = images.length > 0;
+    const target = resolveModel(config, body.provider, hasImage);
+    if (!target.ready) throw failure(hasImage ? '请先在电脑的软件设置中配置支持图片的回答模型。' : '请先在软件设置中填写回答模型的 API Key 和模型 ID。', 409);
+    const task = { id: randomUUID(), question: question || '请解答截图中的问题', image: body.image || null, images: body.images ? [...images] : null, imageCount: images.length, hasImage, clientRequestId: body.clientRequestId, provider: target.provider, source: hasImage ? 'screenshot' : body.source === 'voice' ? 'voice' : 'text', status: 'queued', answer: '', error: '', createdAt: Date.now() };
+    if (hasImage) task.model = target.model;
     task.conversationId=s.id;
     s.tasks.push(task);
     if (s.tasks.length > 100) s.tasks.splice(0, s.tasks.length - 100);
@@ -81,8 +91,8 @@ export async function createService({ config = loadConfig(), webDir = path.resol
             task.answer += delta; announce(s, { type: 'delta', taskId: task.id, delta });
           }
           task.status = 'done';
-        } catch (error) { task.status = 'error'; task.error = error.name === 'AbortError' ? '任务已取消' : error.message; if(task.image && error.name!=='AbortError') rememberRetry(task,s.id); }
-        finally { task.image = null; delete task.controller; task.finishedAt = Date.now(); announce(s, { type: 'task', task: publicTask(task) }); }
+        } catch (error) { task.status = 'error'; task.error = error.name === 'AbortError' ? '任务已取消' : error.message; if(task.hasImage && error.name!=='AbortError') rememberRetry(task,s.id); }
+        finally { task.image = null; task.images = null; delete task.controller; task.finishedAt = Date.now(); announce(s, { type: 'task', task: publicTask(task) }); }
       }
     } finally { s.running = false; }
   }
@@ -94,11 +104,45 @@ export async function createService({ config = loadConfig(), webDir = path.resol
     sessions.set(s.id, s); res.json(await pairing(s));
   });
   app.post('/api/sessions/:id/pair', owner, async (req, res) => res.json(await pairing(getSession(req.params.id), req.body.base)));
+  // A paired phone may request a full screenshot, but cannot submit arbitrary tasks.
+  app.post('/api/sessions/:id/capture', async (req, res) => {
+    const s = getSession(req.params.id);
+    const token = req.headers.authorization?.replace(/^Bearer /, '');
+    const authorized = () => !!s.viewerToken && equal(token, s.viewerToken);
+    if (!authorized()) throw failure('配对已失效，请重新扫码', 401);
+    if (!captureScreen) throw failure('当前服务不支持截图，请启动桌面客户端', 503);
+    if (req.body?.collect !== true && !visionReady()) throw failure('请先在电脑的软件设置中配置支持图片的回答模型。', 409);
+    if (remoteCapturePending) throw failure('正在截图，请稍后再试', 409);
+    if (s.tasks.filter(t => ['queued', 'generating'].includes(t.status)).length >= 5) throw failure('待处理问题已达 5 个，请等待答案后重试', 429);
+    remoteCapturePending = true;
+    try {
+      let image;
+      try { image = await captureScreen(); }
+      catch (error) { throw failure(error.message || '电脑截图失败，请重试', 503); }
+      if (typeof image !== 'string' || !image) throw failure('未能获取电脑截图，请重试', 503);
+      // Pairing can be revoked or replaced while the desktop is capturing.
+      if (!authorized()) throw failure('配对已失效，请重新扫码', 401);
+      if (req.body?.collect === true) return res.json({ image });
+      const task = enqueue(s, { image, question: '请识别并解答截图中的问题。', provider: config.defaultProvider });
+      res.status(202).json(task);
+    } finally { remoteCapturePending = false; }
+  });
+  app.post('/api/sessions/:id/image-batch', (req, res) => {
+    const s = getSession(req.params.id);
+    if (!s.viewerToken || !equal(req.headers.authorization?.replace(/^Bearer /, ''), s.viewerToken)) throw failure('配对已失效，请重新扫码', 401);
+    const { images, clientRequestId } = req.body || {};
+    if (typeof clientRequestId !== 'string' || !/^[a-zA-Z0-9-]{8,80}$/.test(clientRequestId)) throw failure('请求标识无效');
+    const existing = s.tasks.find(t => t.clientRequestId === clientRequestId);
+    if (existing) return res.status(202).json(publicTask(existing));
+    if (!Array.isArray(images) || !images.length) throw failure('请先截取至少一张图片');
+    const task = enqueue(s, { images, clientRequestId, question: `请结合这 ${images.length} 张截图解答同一道题。`, provider: config.defaultProvider });
+    res.status(202).json(task);
+  });
   app.post('/api/sessions/:id/tasks', owner, (req, res) => res.status(202).json(enqueue(getSession(req.params.id), req.body)));
   app.post('/api/sessions/:id/tasks/:taskId/retry', owner, (req,res) => {
     const s=getSession(req.params.id), old=s.tasks.find(t=>t.id===req.params.taskId), cached=retryImages.get(req.params.taskId);
     if(!old || old.status!=='error' || !cached || cached.sessionId!==s.id) throw failure('截图已过期或不可重试，请重新截图',410);
-    const result=enqueue(s,{question:old.question,image:cached.image,provider:req.body.provider});
+    const result=enqueue(s,{question:old.question,image:cached.image,images:cached.images || undefined,provider:req.body.provider});
     forgetRetry(old.id); res.status(202).json(result);
   });
   app.post('/api/sessions/:id/disconnect', owner, (req, res) => {
@@ -111,7 +155,7 @@ export async function createService({ config = loadConfig(), webDir = path.resol
     if (!s || s.pair.expires < Date.now()) throw failure('二维码已使用或已过期，请在电脑上刷新二维码', 410);
     s.pair = null; s.viewerToken = secret();
     for (const ws of s.clients) if (ws.role === 'phone') ws.close(4001, 'replaced');
-    res.json({ sessionId: s.id, viewerToken: s.viewerToken, mode: config.mode });
+    res.json({ sessionId: s.id, viewerToken: s.viewerToken, visionReady: visionReady() });
   });
   server.on('upgrade', (req, socket, head) => {
     const origin = req.headers.origin;
@@ -120,28 +164,13 @@ export async function createService({ config = loadConfig(), webDir = path.resol
     sockets.handleUpgrade(req, socket, head, ws => sockets.emit('connection', ws, req));
   });
   sockets.on('connection', ws => {
-    let s, asr, autoTimer, speech = '', autoAnswer = true, provider = config.defaultProvider;
-    let demoTimer, stopping = false; ws.alive = true;
+    let s; ws.alive = true;
     ws.on('pong', () => { ws.alive = true; });
     const authTimer = setTimeout(() => ws.close(4003, 'auth required'), 5000); authTimer.unref();
-    const stopAudio = () => { clearInterval(demoTimer); demoTimer = null; asr?.stop(); asr = null; };
-    const transcript = item => {
-      if (!s || ws.readyState !== WebSocket.OPEN) return;
-      announce(s, { type: 'transcript', ...item });
-      if (item.final && autoAnswer && !stopping) {
-        speech = `${speech} ${item.text}`.trim(); clearTimeout(autoTimer);
-        autoTimer = setTimeout(() => {
-          const text = speech; speech = '';
-          if (text) try { enqueue(s, { question: text, source: 'voice', provider }); } catch (error) { send(ws, { type: 'error', message: error.message }); }
-        }, 1400); autoTimer.unref();
-      }
-    };
     ws.on('message', (bytes, binary) => {
       try {
         if (binary) {
-          if (!s || ws.role !== 'desktop') return ws.close(4003, 'desktop required');
-          if (bytes.length > 32000 || bytes.length % 2) throw failure('音频数据格式错误');
-          asr?.send(bytes); return;
+          return ws.close(4003, 'binary audio unsupported');
         }
         const msg = JSON.parse(bytes.toString());
         if (!s) {
@@ -155,26 +184,12 @@ export async function createService({ config = loadConfig(), webDir = path.resol
         }
         if (msg.type === 'ping') return send(ws, { type: 'pong' });
         if (ws.role !== 'desktop') throw failure('手机端仅用于接收答案', 403);
-        if (msg.type === 'audio_start') {
-          stopAudio(); stopping = false; autoAnswer = msg.autoAnswer !== false;
-          provider = Object.hasOwn(config.providers,msg.provider) ? msg.provider : config.defaultProvider;
-          speech = ''; clearTimeout(autoTimer);
-          if (config.mode === 'demo') {
-            send(ws, { type: 'asr_state', state: 'ready' });
-            demoTimer = setInterval(() => transcript({ text: '请用简洁的语言解释，什么是大语言模型？', final: true, key: randomUUID() }), 12000);
-            demoTimer.unref();
-          } else {
-            asr = asrFactory(config.asr, transcript, (state, message) => send(ws, { type: 'asr_state', state, message }));
-            asr.start();
-          }
-        } else if (msg.type === 'audio_stop') {
-          stopping = true; clearTimeout(autoTimer); speech = ''; stopAudio(); send(ws, { type: 'asr_state', state: 'stopped' });
-        } else if (msg.type === 'demo_transcript' && config.mode === 'demo') transcript({ text: '请解释 TCP 和 UDP 的主要区别。', final: true, key: randomUUID() });
+        if (['audio_start','audio_stop','demo_transcript'].includes(msg.type)) throw failure('旧版语音采集已移除，请在答案小窗使用实时语音');
       } catch (error) { send(ws, { type: 'error', message: error.message || '请求失败' }); }
     });
     ws.on('error', () => {});
     ws.on('close', () => {
-      stopping = true; clearTimeout(authTimer); clearTimeout(autoTimer); stopAudio();
+      clearTimeout(authTimer);
       if (s) { s.clients.delete(ws); announce(s, { type: 'presence', phoneOnline: [...s.clients].some(w => w.role === 'phone' && w.readyState === WebSocket.OPEN), paired: !!s.viewerToken }); }
     });
   });
@@ -186,7 +201,7 @@ export async function createService({ config = loadConfig(), webDir = path.resol
   app.use((error, _req, res, _next) => res.status(error.status || 500).json({ error: error.status ? error.message : error.type === 'entity.too.large' ? '上传内容过大' : '服务内部错误' }));
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(config.port, host, resolve); });
   port = server.address().port;
-  return { app, server, sessions, config, desktopToken, port, baseUrl: `http://127.0.0.1:${port}`, notifySettings(){for(const s of sessions.values())announce(s,{type:'config',mode:config.mode});}, async close() {
+  return { app, server, sessions, config, desktopToken, port, baseUrl: `http://127.0.0.1:${port}`, notifySettings(){for(const s of sessions.values())announce(s,{type:'config',visionReady:visionReady()});}, async close() {
     clearInterval(heartbeat);
     for (const s of sessions.values()) for (const task of s.tasks) task.controller?.abort();
     for (const ws of sockets.clients) ws.terminate();
